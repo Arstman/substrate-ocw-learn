@@ -53,28 +53,35 @@ pub mod pallet {
 	const LOCK_TIMEOUT_EXPIRATION: u64 = FETCH_TIMEOUT_PERIOD + 1000; // in milli-seconds
 	const LOCK_BLOCK_EXPIRATION: u32 = 3; // in block number
 
-	// 用于查询价格的接口和user-agent
+	// 用于查询价格的接口和user-agent, 以及价格转换比率(目前接口价格是小数点后16位, 因此比率值为10的16次方)
 	const HTTP_DOT_USD_REQUEST: &str = "https://api.coincap.io/v2/assets/polkadot";
 	const HTTP_HEADER_USER_AGENT_FIRFOX: &str = "Mozilla/5.0 (Linux 5.10; x64)";
+	const PRICE_RATIONAL: u64 = 10000000000000000;
 
-	// 用于抽取价格的结构体
+	// 用于抽取价格的复合结构体
 	#[derive(Debug, Deserialize, Encode, Decode, Default)]
 	struct DotPrice {
-		priceUsd: f64,
+		#[serde(deserialize_with = "de_string_to_bytes")]
+		priceUsd: Vec<u8>,
 	}
 
-  //用于提交上链的payload结构
-  #[derive(Encode, Decode, Clone, RuntimeDebug)]
-  pub struct PayloadPrice<Public> {
-    price_list: VecDeque<(u64, Permill)>,
-    public: Public,
-  }
+	#[derive(Debug, Deserialize, Encode, Decode, Default)]
+	struct PriceInfo {
+		data: DotPrice,
+	}
 
-  impl<T: SigningTypes> SignedPayload<T> for PayloadPrice<T::Public> {
-      fn public(&self) -> T::Public {
-        self.public.clone()
-      }
-  }
+	//用于提交价格上链的payload结构
+	#[derive(Encode, Decode, Clone, PartialEq, Eq, RuntimeDebug)]
+	pub struct PayloadPrice<Public> {
+		current_price: (u64, Permill),
+		public: Public,
+	}
+
+	impl<T: SigningTypes> SignedPayload<T> for PayloadPrice<T::Public> {
+		fn public(&self) -> T::Public {
+			self.public.clone()
+		}
+	}
 	/// Based on the above `KeyTypeId` we need to generate a pallet-specific crypto type wrapper.
 	/// We can utilize the supported crypto kinds (`sr25519`, `ed25519` and `ecdsa`) and augment
 	/// them with the pallet-specific identifier.
@@ -112,14 +119,13 @@ pub mod pallet {
 		number: u64,
 		public: Public,
 	}
-  
+
 	impl<T: SigningTypes> SignedPayload<T> for Payload<T::Public> {
 		fn public(&self) -> T::Public {
 			self.public.clone()
 		}
 	}
 
-  
 	// ref: https://serde.rs/container-attrs.html#crate
 	#[derive(Deserialize, Encode, Decode, Default)]
 	struct GithubInfo {
@@ -186,6 +192,8 @@ pub mod pallet {
 	#[pallet::generate_deposit(pub(super) fn deposit_event)]
 	pub enum Event<T: Config> {
 		NewNumber(Option<T::AccountId>, u64),
+		//新价格的事件
+		NewPrice(Option<T::AccountId>, (u64, Permill)),
 	}
 
 	// Errors inform users that something went wrong.
@@ -206,6 +214,8 @@ pub mod pallet {
 
 		// Error returned when fetching github info
 		HttpFetchingError,
+		//提交价格时候报错信息
+		FetchPriceInfoError,
 	}
 
 	#[pallet::hooks]
@@ -273,6 +283,18 @@ pub mod pallet {
 					}
 					valid_tx(b"submit_number_unsigned_with_signed_payload".to_vec())
 				}
+				Call::submit_prices_unsigned_with_signed_payload(
+					ref payload_price,
+					ref signature,
+				) => {
+					if !SignedPayload::<T>::verify::<T::AuthorityId>(
+						payload_price,
+						signature.clone(),
+					) {
+						return InvalidTransaction::BadProof.into();
+					}
+					valid_tx(b"submit_price_unsigned_with_signed_payload".to_vec())
+				}
 				_ => InvalidTransaction::Call.into(),
 			}
 		}
@@ -317,23 +339,27 @@ pub mod pallet {
 			Ok(())
 		}
 
-    #[pallet::weight(10000)]
-    pub fn submit_prices_unsigned_with_signed_payload(
-      origin: OriginFor<T>,
-      payload: PayloadPrice<T::Public>,
-      _signature: T::Signature,
-    ) -> DispatchResult {
-      let _ = ensure_none(origin)?;
+		#[pallet::weight(10000)]
+		pub fn submit_prices_unsigned_with_signed_payload(
+			origin: OriginFor<T>,
+			payload: PayloadPrice<T::Public>,
+			_signature: T::Signature,
+		) -> DispatchResult {
+			let _ = ensure_none(origin)?;
 
-      let PayloadPrice { price_list, public} = payload;
+			let PayloadPrice { current_price, public } = payload;
 
-      log::info!("Submit_prices_unsigned_with_signed_payload: ({:?}, {:?})", price_list, public);
-      //TODO-2
+			log::info!(
+				"Submit_prices_unsigned_with_signed_payload: ({:?}, {:?})",
+				current_price,
+				public
+			);
 
-      Ok(())
+			Self::append_or_replace_price(current_price);
+			Self::deposit_event(Event::NewPrice(None, current_price));
 
-
-    }
+			Ok(())
+		}
 	}
 
 	impl<T: Config> Pallet<T> {
@@ -361,55 +387,50 @@ pub mod pallet {
 
 			// 这个 http 请求可得到当前 DOT 价格：
 			// [https://api.coincap.io/v2/assets/polkadot](https://api.coincap.io/v2/assets/polkadot)。
-			//
+			let singer = Signer::<T, T::AuthorityId>::any_account();
 
-			let s_price = StorageValueRef::persistent(b"offchain::dot-usd-price");
-
-			//构造一个新的价格列表, 用来缓存当前已经有的价格列表
-			let mut current_list: VecDeque<(u64, Permill)> = Vec::with_capacity(10);
-
-			//如果当前已经有价格列表存在与local storage里面, 则将其取出并拷贝赋值给刚才新建的列表
-			if let Ok(Some(price_list)) = s_price.get::<VecDeque<u64, Permill>>() {
-				current_list = price_list.clone();
+      //获取最新的价格
+			let current_price = Self::fetch_price_n_parse().map_err(|_| <Error<T>>::HttpFetchingError)?;
+      // 使用submit unsigned transaction with payload 方法来提交数据上链, 原因如下:
+      // 1. 采用signed transaction提交会产生费用, 长期运行带来巨额开销,
+      //    而价格信息本身是免费资料, 且链上数据我们已经确定只存最新10个价格, 
+      //    存储成本不算高, 为此花费过多没有必要
+      //
+      // 2. 如果但存使用unsigned transaction提交, 那么相当于任何账户都可以对此提交, 则很容易遭受DDOS类似攻击, 且很难追溯,
+      //    不可取
+      //
+      // 3. 而unsigned transaction with payload 方法提交则比较平衡, 由于能提交的账户是预先runtime里面注入的, 因此具备一定
+      //    的风险可控性, 且发现滥用也相对比较容易追溯
+      //  
+      // 综上, 采用unsigned transaction with payload 方法提交是比较合理的选择.
+      //
+      //
+			if let Some((_, res)) = singer.send_unsigned_transaction(
+				|acct| PayloadPrice { current_price, public: acct.public.clone() },
+				Call::submit_prices_unsigned_with_signed_payload,
+			) {
+				return res.map_err(|_| {
+					log::error!("Failed in fetch_price_info");
+					<Error<T>>::FetchPriceInfoError
+				});
 			}
 
-			//尝试获取锁
-			let mut lock = StorageLock::<BlockAndTime<Self>>::with_block_and_time_deadline(
-				b"offchain-price::lock",
-				LOCK_BLOCK_EXPIRATION,
-				rt_offchain::Duration::from_millis(LOCK_TIMEOUT_EXPIRATION),
-			);
+			log::error!("No local account available");
+			Err(<Error<T>>::NoLocalAcctForSigning)
+		}
 
-			if let Ok(_guard) = lock.try_lock() {
-				match Self::fetch_price_n_parse() {
-					//尝试拿到最新价格
-					Ok(dot_price) => {
-						let current_price = Self::dot_price_to_tuple(dot_price);
-
-						//拿到最新价格后, 对比缓存的价格列表, 如果列表长度已经等于10则去掉最前面一个, 然后将新价格添加于末尾; 如果小于10则直接添加.
-						if current_list.len == 10 {
-							let _old = current_list.pop_front();
-						}
-						current_list.push_back(current_price);
-						s_price.set(&current_list);
-					}
-					Err(err) => {
-						return Err(err);
-					}
+		fn append_or_replace_price(price: (u64, Permill)) {
+			Prices::<T>::mutate(|prices| {
+				if prices.len() == NUM_VEC_LEN {
+					let _ = prices.pop_front();
 				}
-			}
-			Ok(())
+				prices.push_back(price);
+				log::info!("Prices vector: {:?}", prices);
+			});
 		}
 
-    //抽取的价格DotPrice结构转换为(u64, Permill) 元组
-		fn dot_price_to_tuple(dot_price: DotPrice) -> (u64, Permill) {
-			let int = dot_price.priceUsd.trunc();
-			let fract = dot_price.priceUsd.fract();
-			(int as u64, Permill::from_float(fract))
-		}
-
-    //将获取的价格转换为DotPrice结构
-		fn fetch_price_n_parse() -> Result<DotPrice, Error<T>> {
+		//获取价格, 并将获取的价格转换为(u64, Permill)元组结构
+		fn fetch_price_n_parse() -> Result<(u64, Permill), Error<T>> {
 			let resp_bytes = Self::fetch_price_from_remote().map_err(|e| {
 				log::error!("fetch_frfom_remote error: {:?}", e);
 				<Error<T>>::HttpFetchingError
@@ -421,11 +442,31 @@ pub mod pallet {
 			log::info!("{}", resp_str);
 
 			// Deserializing JSON to struct, thanks to `serde` and `serde_derive`
-			let current_price: DotPrice =
+			let price_info: PriceInfo =
 				serde_json::from_str(&resp_str).map_err(|_| <Error<T>>::HttpFetchingError)?;
+
+			log::info!(" the price info is ***** {:?}", &price_info);
+
+			// 将价格从结构中抽出, 并转为&str, 之后parse为相应的元组结构
+			let price_str = str::from_utf8(&price_info.data.priceUsd)
+				.map_err(|_| <Error<T>>::HttpFetchingError)?;
+
+      let current_price = Self::parse_price_from_str(price_str).map_err(|_| <Error<T>>::HttpFetchingError)?;
+
 			Ok(current_price)
 		}
 
+		// 辅助函数, 用于将&str形式的价格转换为元组, 做法是拆分小数点前后数字为u64
+		// 并将拆分后的小数部分转换为Permill类型
+		fn parse_price_from_str(s: &str) -> Result<(u64, Permill), Error<T>> {
+			let v: Vec<&str> = s.split_terminator('.').collect::<Vec<&str>>();
+
+			let int: u64 = v[0].parse::<u64>().map_err(|_| <Error<T>>::HttpFetchingError)?;
+			let fract: u64 = v[1].parse::<u64>().map_err(|_| <Error<T>>::HttpFetchingError)?;
+			Ok((int, Permill::from_rational(fract, PRICE_RATIONAL)))
+		}
+
+		// 辅助函数, 用于HTTP获取远程价格
 		fn fetch_price_from_remote() -> Result<Vec<u8>, Error<T>> {
 			log::info!("sending price request to: {}", HTTP_DOT_USD_REQUEST);
 
