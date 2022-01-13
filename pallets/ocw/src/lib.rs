@@ -389,22 +389,23 @@ pub mod pallet {
 			// [https://api.coincap.io/v2/assets/polkadot](https://api.coincap.io/v2/assets/polkadot)。
 			let singer = Signer::<T, T::AuthorityId>::any_account();
 
-      //获取最新的价格
-			let current_price = Self::fetch_price_n_parse().map_err(|_| <Error<T>>::HttpFetchingError)?;
-      // 使用submit unsigned transaction with payload 方法来提交数据上链, 原因如下:
-      // 1. 采用signed transaction提交会产生费用, 长期运行带来巨额开销,
-      //    而价格信息本身是免费资料, 且链上数据我们已经确定只存最新10个价格, 
-      //    存储成本不算高, 为此花费过多没有必要
-      //
-      // 2. 如果但存使用unsigned transaction提交, 那么相当于任何账户都可以对此提交, 则很容易遭受DDOS类似攻击, 且很难追溯,
-      //    不可取
-      //
-      // 3. 而unsigned transaction with payload 方法提交则比较平衡, 由于能提交的账户是预先runtime里面注入的, 因此具备一定
-      //    的风险可控性, 且发现滥用也相对比较容易追溯
-      //  
-      // 综上, 采用unsigned transaction with payload 方法提交是比较合理的选择.
-      //
-      //
+			//获取最新的价格
+			let current_price =
+				Self::fetch_price_n_parse().map_err(|_| <Error<T>>::HttpFetchingError)?;
+			// 使用submit unsigned transaction with payload 方法来提交数据上链, 原因如下:
+			// 1. 采用signed transaction提交会产生费用, 长期运行带来巨额开销,
+			//    而价格信息本身是免费资料, 且链上数据我们已经确定只存最新10个价格,
+			//    存储成本不算高, 为此花费过多没有必要
+			//
+			// 2. 如果但存使用unsigned transaction提交, 那么相当于任何账户都可以对此提交, 则很容易遭受DDOS类似攻击, 且很难追溯,
+			//    不可取
+			//
+			// 3. 而unsigned transaction with payload 方法提交则比较平衡, 由于能提交的账户是预先runtime里面注入的, 因此具备一定
+			//    的风险可控性, 且发现滥用也相对比较容易追溯
+			//
+			// 综上, 采用unsigned transaction with payload 方法提交是比较合理的选择.
+			//
+			//
 			if let Some((_, res)) = singer.send_unsigned_transaction(
 				|acct| PayloadPrice { current_price, public: acct.public.clone() },
 				Call::submit_prices_unsigned_with_signed_payload,
@@ -451,7 +452,8 @@ pub mod pallet {
 			let price_str = str::from_utf8(&price_info.data.priceUsd)
 				.map_err(|_| <Error<T>>::HttpFetchingError)?;
 
-      let current_price = Self::parse_price_from_str(price_str).map_err(|_| <Error<T>>::HttpFetchingError)?;
+			let current_price =
+				Self::parse_price_from_str(price_str).map_err(|_| <Error<T>>::HttpFetchingError)?;
 
 			Ok(current_price)
 		}
