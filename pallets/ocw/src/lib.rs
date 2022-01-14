@@ -338,7 +338,7 @@ pub mod pallet {
 			Self::deposit_event(Event::NewNumber(None, number));
 			Ok(())
 		}
-
+    // 用于提交价格上链的Call
 		#[pallet::weight(10000)]
 		pub fn submit_prices_unsigned_with_signed_payload(
 			origin: OriginFor<T>,
@@ -387,25 +387,23 @@ pub mod pallet {
 
 			// 这个 http 请求可得到当前 DOT 价格：
 			// [https://api.coincap.io/v2/assets/polkadot](https://api.coincap.io/v2/assets/polkadot)。
-			let singer = Signer::<T, T::AuthorityId>::any_account();
 
 			//获取最新的价格
 			let current_price =
 				Self::fetch_price_n_parse().map_err(|_| <Error<T>>::HttpFetchingError)?;
 			// 使用submit unsigned transaction with payload 方法来提交数据上链, 原因如下:
-			// 1. 采用signed transaction提交会产生费用, 长期运行带来巨额开销,
+      //
+			// 1. 使用signed transaction提交会产生费用, 长期运行带来巨额开销,
 			//    而价格信息本身是免费资料, 且链上数据我们已经确定只存最新10个价格,
 			//    存储成本不算高, 为此花费过多没有必要
-			//
-			// 2. 如果但存使用unsigned transaction提交, 那么相当于任何账户都可以对此提交, 则很容易遭受DDOS类似攻击, 且很难追溯,
+			// 2. 使用unsigned transaction提交, 那么相当于任何账户都可以对此提交, 则很容易遭受DDOS类似攻击, 且很难追溯,
 			//    不可取
-			//
-			// 3. 而unsigned transaction with payload 方法提交则比较平衡, 由于能提交的账户是预先runtime里面注入的, 因此具备一定
+			// 3. 使用unsigned transaction with payload 方法提交则比较平衡, 由于能提交的账户是预先runtime里面注入的, 因此具备一定
 			//    的风险可控性, 且发现滥用也相对比较容易追溯
-			//
 			// 综上, 采用unsigned transaction with payload 方法提交是比较合理的选择.
 			//
-			//
+			let singer = Signer::<T, T::AuthorityId>::any_account();
+
 			if let Some((_, res)) = singer.send_unsigned_transaction(
 				|acct| PayloadPrice { current_price, public: acct.public.clone() },
 				Call::submit_prices_unsigned_with_signed_payload,
@@ -420,6 +418,7 @@ pub mod pallet {
 			Err(<Error<T>>::NoLocalAcctForSigning)
 		}
 
+    //修改Prices存储, 保证只存储最新10个价格数据
 		fn append_or_replace_price(price: (u64, Permill)) {
 			Prices::<T>::mutate(|prices| {
 				if prices.len() == NUM_VEC_LEN {
