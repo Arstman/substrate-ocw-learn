@@ -398,8 +398,8 @@ pub mod pallet {
 			//    存储成本不算高, 为此花费过多没有必要
 			// 2. 使用unsigned transaction提交, 那么相当于任何账户都可以对此提交, 则很容易遭受DDOS类似攻击, 且很难追溯,
 			//    不可取
-			// 3. 使用unsigned transaction with payload 方法提交则比较平衡, 由于能提交的账户是预先runtime里面注入的, 因此具备一定
-			//    的风险可控性, 且发现滥用也相对比较容易追溯
+			// 3. 使用unsigned transaction with payload 方法提交则比较平衡, 无须因每次提交而付费, 同时能记录提交者的身份, 方便追溯, 因此具备一定
+			//    的风险可控性, 且发现滥用也相对比较容易追溯处理
 			// 综上, 采用unsigned transaction with payload 方法提交是比较合理的选择.
 			//
 			let singer = Signer::<T, T::AuthorityId>::any_account();
